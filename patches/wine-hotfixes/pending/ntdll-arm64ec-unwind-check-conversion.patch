@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: ntdll: Check the result of the x64 to ARM context conversion when unwinding
+
+context_x64_to_arm() returns a status when the extended state cannot be
+located; RtlVirtualUnwind2 ignored it and unwound an ARM64EC frame with a
+partially initialised context, which can restore garbage pc/lr and end in
+"Exception frame is not in stack limits".
+
+Also stop reading the AVX state from a NULL pointer when
+RtlLocateExtendedFeature() finds no AVX area.
+
+---
+
+diff --git a/dlls/ntdll/unwind.c b/dlls/ntdll/unwind.c
+index bfffb1a..6bf7ad1 100644
+--- a/dlls/ntdll/unwind.c
++++ b/dlls/ntdll/unwind.c
+@@ -2160,7 +2160,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
+         ARM64_NT_CONTEXT arm_context;
+         NTSTATUS status;
+ 
+-        context_x64_to_arm( &arm_context, (ARM64EC_NT_CONTEXT *)context );
++        if ((status = context_x64_to_arm( &arm_context, (ARM64EC_NT_CONTEXT *)context ))) return status;
+         status = RtlVirtualUnwind2_arm64( type, base, pc, (ARM64_RUNTIME_FUNCTION *)function,
+                                           &arm_context, NULL, data, frame_ret, NULL,
+                                           limit_low, limit_high, handler_ret, flags );
+diff --git a/dlls/ntdll/unwind.h b/dlls/ntdll/unwind.h
+index 6e8b716..6e03dab 100644
+--- a/dlls/ntdll/unwind.h
++++ b/dlls/ntdll/unwind.h
+@@ -127,8 +127,9 @@ static inline UINT fpcsr_to_mxcsr( UINT fpcr, UINT fpsr )
+     return ret;
+ }
+ 
+-static inline void context_x64_to_arm( ARM64_NT_CONTEXT *arm_ctx, const ARM64EC_NT_CONTEXT *ec_ctx )
++static inline NTSTATUS context_x64_to_arm( ARM64_NT_CONTEXT *arm_ctx, const ARM64EC_NT_CONTEXT *ec_ctx )
+ {
++    NTSTATUS status = STATUS_SUCCESS;
+     UINT64 fpcsr;
+ 
+     arm_ctx->ContextFlags = ctx_flags_x64_to_arm( ec_ctx->ContextFlags );
+@@ -176,8 +177,15 @@ static inline void context_x64_to_arm( ARM64_NT_CONTEXT *arm_ctx, const ARM64EC_
+     {
+         CONTEXT_EX *ec_xctx = (CONTEXT_EX *)(ec_ctx + 1);
+         YMMCONTEXT *ec_ymm = RtlLocateExtendedFeature( ec_xctx, XSTATE_AVX, NULL );
+-        memcpy( arm_ctx->V + 16, ec_ymm, sizeof(*ec_ymm) );
++        if (ec_ymm) memcpy( arm_ctx->V + 16, ec_ymm, sizeof(*ec_ymm) );
++        else
++        {
++            memset( arm_ctx->V + 16, 0, sizeof(*ec_ymm) );
++            status = STATUS_INVALID_PARAMETER;
++        }
+     }
++
++    return status;
+ }
+ 
+ static inline void context_arm_to_x64( ARM64EC_NT_CONTEXT *ec_ctx, const ARM64_NT_CONTEXT *arm_ctx )
